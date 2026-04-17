@@ -1,5 +1,8 @@
 # ESPN Cricket Commentary Scraper
 
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fvipulchartal-star%2Fkarla.git)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/vipulchartal-star/karla.git)
+
 Scrapes an ESPN cricket commentary URL and returns normalized JSON with:
 
 - Match metadata from ESPN's summary API
