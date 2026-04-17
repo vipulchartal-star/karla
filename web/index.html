@@ -38,21 +38,34 @@
 
     .header-flex {
       display: flex;
-      justify-content: space-between;
+      justify-content: flex-start;
       align-items: center;
+      gap: 12px;
+    }
+
+    .score-block {
+      min-width: 0;
+      flex: 1 1 auto;
     }
 
     .score-block h1 { 
         margin: 0; 
         font-family: "JetBrains Mono", monospace; 
-        font-size: 1.8rem; 
+        font-size: clamp(1.15rem, 4.8vw, 1.45rem); 
         letter-spacing: -1px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        line-height: 1.1;
     }
     .score-block p { 
         margin: 4px 0 0 0;
         font-size: 0.8rem; 
         color: var(--muted); 
         font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
     .live-indicator {
@@ -66,6 +79,12 @@
       font-size: 10px;
       font-weight: 900;
       text-transform: uppercase;
+    }
+    .live-indicator.card {
+      padding: 4px 10px;
+      font-size: 9px;
+      justify-content: flex-end;
+      align-self: flex-end;
     }
     .dot { width: 6px; height: 6px; background: var(--lose); border-radius: 50%; animation: blink 1.2s infinite; }
     @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
@@ -85,10 +104,32 @@
     .card-header {
       display: flex;
       justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
       margin-bottom: 20px;
     }
-    .card-title { font-size: 11px; font-weight: 800; color: var(--muted); text-transform: uppercase; }
-    .card-title span { color: var(--accent); margin-left: 4px; }
+    .card-meta {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 6px;
+    }
+    .card-title {
+      font-size: 10px;
+      font-weight: 800;
+      color: var(--muted);
+      text-transform: uppercase;
+      white-space: nowrap;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+    .card-title span {
+      color: var(--accent);
+      margin-left: 4px;
+      font-size: 9px;
+      display: inline-block;
+      vertical-align: middle;
+    }
 
     .grid {
       display: grid;
@@ -240,9 +281,6 @@
       <h1 id="score-val">Waiting...</h1>
       <p id="context-val">Loading live score...</p>
     </div>
-    <div class="live-indicator">
-      <div class="dot"></div> Live
-    </div>
   </div>
 </header>
 
@@ -250,8 +288,13 @@
   <div class="prediction-card">
     <div class="card-header">
       <div class="card-title">Next Ball <span id="target-ball">--</span></div>
-      <div style="font-size: 10px; font-weight: 800;">
+      <div class="card-meta">
+        <div style="font-size: 10px; font-weight: 800;">
         W: <span id="w-count" style="color:var(--accent)">0</span> L: <span id="l-count" style="color:var(--lose)">0</span>
+        </div>
+        <div class="live-indicator card">
+          <div class="dot"></div> Live
+        </div>
       </div>
     </div>
 
