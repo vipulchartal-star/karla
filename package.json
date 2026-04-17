@@ -1,0 +1,12 @@
+{
+  "name": "espn-cricket-commentary-scraper",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CLI and HTTP API for ESPN cricket commentary pages",
+  "type": "module",
+  "scripts": {
+    "scrape": "node espn-cricket-commentary-scraper.mjs",
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs"
+  }
+}
