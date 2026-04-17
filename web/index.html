@@ -368,16 +368,13 @@
     const teamA = d.score?.[0];
     const teamB = d.score?.[1];
     const scoreVal = teamA ? `${getTeamLabel(teamA)} ${getTeamScore(teamA)}` : "Waiting...";
-    const contextParts = [`Ov ${formatOverLabel(d.latestOver)}`];
+    const contextParts = [];
     if (teamB) {
       contextParts.push(`${getTeamLabel(teamB)} ${getTeamScore(teamB)}`);
     }
-    if (d.game?.targetBallLabel) {
-      contextParts.push(d.game.targetBallLabel);
-    }
 
     document.getElementById("score-val").textContent = scoreVal;
-    document.getElementById("context-val").textContent = contextParts.join(" • ");
+    document.getElementById("context-val").textContent = contextParts.join(" • ") || "";
     document.getElementById("target-ball").textContent = d.game?.targetBallLabel || "--";
     document.getElementById("w-count").textContent = d.game?.wins ?? 0;
     document.getElementById("l-count").textContent = d.game?.losses ?? 0;
