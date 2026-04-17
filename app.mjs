@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { appendFile, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { scrapeEspnCommentary } from "./espn-cricket-commentary.mjs";
@@ -11,20 +12,112 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const HOME_PAGE_PATH = path.join(__dirname, "web", "index.html");
 const ACTIVE_MARKET_PATH = path.join(__dirname, "active-market.txt");
+const LOG_PATH = path.join(__dirname, "activity.log");
+const LOCAL_ENV_PATH = path.join(__dirname, ".env");
+
+function loadLocalEnvFile() {
+  if (!existsSync(LOCAL_ENV_PATH)) {
+    return;
+  }
+
+  try {
+    const raw = readFileSync(LOCAL_ENV_PATH, "utf8");
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) {
+        continue;
+      }
+
+      const equalsIndex = trimmed.indexOf("=");
+      if (equalsIndex <= 0) {
+        continue;
+      }
+
+      const key = trimmed.slice(0, equalsIndex).trim();
+      let value = trimmed.slice(equalsIndex + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+
+      if (key && process.env[key] === undefined) {
+        process.env[key] = value;
+      }
+    }
+  } catch {
+    // Ignore local env load failures.
+  }
+}
+
+loadLocalEnvFile();
+const DATABASE_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || null;
+const POSTGRES_SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS app_events (
+    id BIGSERIAL PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    source TEXT NOT NULL,
+    event TEXT NOT NULL,
+    details JSONB NOT NULL DEFAULT '{}'::jsonb
+  )`,
+  `CREATE TABLE IF NOT EXISTS scrape_runs (
+    id BIGSERIAL PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    market_url TEXT NOT NULL,
+    scraped_at TIMESTAMPTZ NULL,
+    cached BOOLEAN NOT NULL DEFAULT FALSE,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    payload JSONB NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS live_snapshots (
+    id BIGSERIAL PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    market_url TEXT NOT NULL,
+    reason TEXT NULL,
+    payload JSONB NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS user_bets (
+    id BIGSERIAL PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    market_url TEXT NOT NULL,
+    target_ball_id TEXT NULL,
+    target_ball_label TEXT NULL,
+    pick TEXT NOT NULL,
+    selected_picks JSONB NOT NULL DEFAULT '[]'::jsonb
+  )`,
+  `CREATE TABLE IF NOT EXISTS bet_settlements (
+    id BIGSERIAL PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    market_url TEXT NOT NULL,
+    target_ball_id TEXT NULL,
+    actual TEXT NOT NULL,
+    result TEXT NOT NULL,
+    selected_picks JSONB NOT NULL DEFAULT '[]'::jsonb,
+    message TEXT NULL
+  )`,
+];
 
 const cache = new Map();
 const liveJobs = new Map();
+const sseClients = new Set();
+let postgresPoolPromise = null;
+let postgresSchemaPromise = null;
+let postgresReady = false;
+let postgresInitFailed = false;
 const gameState = {
   marketUrl: null,
   wins: 0,
   losses: 0,
-  pendingPick: null,
+  selectedPicks: [],
+  selectionBallId: null,
   targetBallId: null,
   targetBallLabel: null,
   resolvedBallId: null,
   lastResult: "Make your move for the next delivery.",
   lastResultType: "neutral",
 };
+let logWriteChain = Promise.resolve();
 
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
@@ -44,6 +137,235 @@ function sendHtml(response, statusCode, html) {
     "access-control-allow-headers": "content-type",
   });
   response.end(html);
+}
+
+function sendSse(response, event, data) {
+  response.write(`event: ${event}\n`);
+  response.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function shouldUsePostgresSsl(connectionString) {
+  if (process.env.PGSSLMODE === "require") {
+    return true;
+  }
+
+  try {
+    const url = new URL(connectionString);
+    return !["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+async function getPostgresPool() {
+  if (!DATABASE_URL) {
+    return null;
+  }
+
+  if (!postgresPoolPromise) {
+    postgresPoolPromise = (async () => {
+      try {
+        const { Pool } = await import("pg");
+        const pool = new Pool({
+          connectionString: DATABASE_URL,
+          ssl: shouldUsePostgresSsl(DATABASE_URL)
+            ? { rejectUnauthorized: false }
+            : undefined,
+        });
+        return pool;
+      } catch (error) {
+        if (!postgresInitFailed) {
+          postgresInitFailed = true;
+          void logServer("postgres_disabled", {
+            message: error.message,
+          });
+        }
+        return null;
+      }
+    })();
+  }
+
+  return postgresPoolPromise;
+}
+
+async function ensurePostgresSchema() {
+  const pool = await getPostgresPool();
+  if (!pool) {
+    return null;
+  }
+
+  if (!postgresSchemaPromise) {
+    postgresSchemaPromise = (async () => {
+      for (const statement of POSTGRES_SCHEMA) {
+        await pool.query(statement);
+      }
+      postgresReady = true;
+      return pool;
+    })().catch((error) => {
+      postgresSchemaPromise = null;
+      postgresReady = false;
+      if (!postgresInitFailed) {
+        postgresInitFailed = true;
+        void logServer("postgres_disabled", {
+          message: error.message,
+        });
+      }
+      return null;
+    });
+  }
+
+  return postgresSchemaPromise;
+}
+
+async function persistPostgresEvent(source, event, details) {
+  const pool = await ensurePostgresSchema();
+  if (!pool) {
+    return;
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO app_events (source, event, details) VALUES ($1, $2, $3::jsonb)`,
+      [source, event, JSON.stringify(details ?? {})],
+    );
+  } catch {
+    // Keep the app running if the database is unavailable.
+  }
+}
+
+async function persistScrapeRun(marketUrl, scrapedAt, cached, fetchedAt, payload) {
+  const pool = await ensurePostgresSchema();
+  if (!pool) {
+    return;
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO scrape_runs (market_url, scraped_at, cached, fetched_at, payload)
+       VALUES ($1, $2, $3, $4, $5::jsonb)`,
+      [
+        marketUrl,
+        scrapedAt || null,
+        Boolean(cached),
+        fetchedAt || new Date().toISOString(),
+        JSON.stringify(payload ?? {}),
+      ],
+    );
+  } catch {
+    // Keep the app running if the database is unavailable.
+  }
+}
+
+async function persistLiveSnapshot(marketUrl, reason, payload) {
+  const pool = await ensurePostgresSchema();
+  if (!pool) {
+    return;
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO live_snapshots (market_url, reason, payload)
+       VALUES ($1, $2, $3::jsonb)`,
+      [marketUrl, reason || null, JSON.stringify(payload ?? {})],
+    );
+  } catch {
+    // Keep the app running if the database is unavailable.
+  }
+}
+
+async function persistUserBet(marketUrl, bet) {
+  const pool = await ensurePostgresSchema();
+  if (!pool) {
+    return;
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO user_bets (market_url, target_ball_id, target_ball_label, pick, selected_picks)
+       VALUES ($1, $2, $3, $4, $5::jsonb)`,
+      [
+        marketUrl,
+        bet.targetBallId || null,
+        bet.targetBallLabel || null,
+        bet.pick,
+        JSON.stringify(bet.selectedPicks ?? []),
+      ],
+    );
+  } catch {
+    // Keep the app running if the database is unavailable.
+  }
+}
+
+async function persistBetSettlement(marketUrl, settlement) {
+  const pool = await ensurePostgresSchema();
+  if (!pool) {
+    return;
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO bet_settlements (market_url, target_ball_id, actual, result, selected_picks, message)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
+      [
+        marketUrl,
+        settlement.targetBallId || null,
+        settlement.actual,
+        settlement.result,
+        JSON.stringify(settlement.selectedPicks ?? []),
+        settlement.message || null,
+      ],
+    );
+  } catch {
+    // Keep the app running if the database is unavailable.
+  }
+}
+
+function broadcastSnapshot(activeUrl, latestData, reason) {
+  const snapshot = summarizeLiveScore(latestData);
+  snapshot.reason = reason;
+  snapshot.activeUrl = activeUrl;
+
+  void persistLiveSnapshot(activeUrl, reason, snapshot);
+
+  for (const client of sseClients) {
+    try {
+      sendSse(client.response, "snapshot", snapshot);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
+
+function queueLog(entry) {
+  const line = `${JSON.stringify({
+    ts: new Date().toISOString(),
+    ...entry,
+  })}\n`;
+
+  logWriteChain = logWriteChain
+    .then(async () => {
+      await appendFile(LOG_PATH, line, "utf8");
+      await persistPostgresEvent(entry.source || "unknown", entry.event || "unknown", entry.details || {});
+    })
+    .catch(() => {});
+
+  return logWriteChain;
+}
+
+function logServer(event, details = {}) {
+  return queueLog({
+    source: "server",
+    event,
+    details,
+  });
+}
+
+function logUser(event, details = {}) {
+  return queueLog({
+    source: "user",
+    event,
+    details,
+  });
 }
 
 function parseJsonBody(request) {
@@ -116,6 +438,22 @@ async function getActiveMarketUrl() {
   }
 }
 
+async function readRecentLogs(limit = 100) {
+  try {
+    const raw = await readFile(LOG_PATH, "utf8");
+    const lines = raw.trim().split("\n").filter(Boolean);
+    return lines.slice(-limit).map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return { ts: null, source: "unknown", event: "parse_error", raw: line };
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
 function summarizeLiveScore(data) {
   const match = data?.match ?? {};
   const teams = match.teams ?? [];
@@ -159,7 +497,8 @@ function summarizeLiveScore(data) {
     game: {
       wins: gameState.wins,
       losses: gameState.losses,
-      pendingPick: gameState.pendingPick,
+      selectedPicks: gameState.selectedPicks,
+      selectionBallId: gameState.selectionBallId,
       targetBallId: gameState.targetBallId,
       targetBallLabel: gameState.targetBallLabel,
       lastResult: gameState.lastResult,
@@ -189,6 +528,7 @@ async function getScrape(url, ttlMs) {
     data,
     fetchedAt: now,
   });
+  void persistScrapeRun(url, data?.scrapedAt ?? null, false, new Date(now).toISOString(), data);
 
   return {
     data,
@@ -255,6 +595,15 @@ function startLiveJob(url, intervalMs) {
         data: latest,
         fetchedAt: Date.now(),
       });
+      void persistScrapeRun(
+        url,
+        latest?.scrapedAt ?? null,
+        false,
+        job.lastUpdatedAt,
+        latest,
+      );
+      reconcileGameState(url, latest);
+      broadcastSnapshot(url, latest, "tick");
     } catch (error) {
       job.lastError = error.message;
     } finally {
@@ -264,6 +613,7 @@ function startLiveJob(url, intervalMs) {
 
   job.timer = setInterval(tick, intervalMs);
   tick();
+  void logServer("live_job_started", { url, intervalMs });
   liveJobs.set(url, job);
   return job;
 }
@@ -276,6 +626,7 @@ function stopLiveJob(url) {
 
   clearInterval(job.timer);
   liveJobs.delete(url);
+  void logServer("live_job_stopped", { url });
   return true;
 }
 
@@ -287,7 +638,8 @@ function resetGameStateForMarket(activeUrl) {
   gameState.marketUrl = activeUrl;
   gameState.wins = 0;
   gameState.losses = 0;
-  gameState.pendingPick = null;
+  gameState.selectedPicks = [];
+  gameState.selectionBallId = null;
   gameState.targetBallId = null;
   gameState.targetBallLabel = null;
   gameState.resolvedBallId = null;
@@ -300,40 +652,74 @@ function reconcileGameState(activeUrl, latestData) {
 
   const latestFeedItem = latestData?.innings?.[latestData.innings.length - 1]?.commentary?.slice(-1)[0] || null;
   const ended = Boolean(latestData?.match?.status?.completed || latestData?.match?.status?.state === "post");
+  const previousTargetBallId = gameState.targetBallId;
 
   if (!latestFeedItem) {
     return;
   }
 
-  if (gameState.pendingPick && latestFeedItem.id !== gameState.targetBallId && latestFeedItem.id !== gameState.resolvedBallId) {
-    const actual = getEventLabel(latestFeedItem);
-    const won = actual === gameState.pendingPick;
-    gameState.resolvedBallId = latestFeedItem.id;
-    if (won) {
-      gameState.wins += 1;
-      gameState.lastResultType = "win";
-      gameState.lastResult = `Correct! It was ${actual}`;
-    } else {
-      gameState.losses += 1;
-      gameState.lastResultType = "lose";
-      gameState.lastResult = `Missed! It was ${actual}`;
-    }
-    gameState.pendingPick = null;
-  }
+  const selectionChanged = latestFeedItem.id !== previousTargetBallId;
+  const selectedPicks = gameState.selectedPicks;
 
   if (ended) {
-    if (gameState.pendingPick) {
-      gameState.pendingPick = null;
+    if (selectedPicks.length) {
       gameState.lastResultType = "neutral";
       gameState.lastResult = "Match ended before your last pick could resolve.";
     }
+    gameState.selectedPicks = [];
+    gameState.selectionBallId = null;
     gameState.targetBallId = latestFeedItem.id;
     gameState.targetBallLabel = "match finished";
     return;
   }
 
+  if (selectionChanged) {
+      if (gameState.selectionBallId === previousTargetBallId && selectedPicks.length) {
+      const actual = getEventLabel(latestFeedItem);
+      const won = selectedPicks.includes(actual);
+      gameState.resolvedBallId = latestFeedItem.id;
+      gameState.wins += won ? 1 : 0;
+      gameState.losses += won ? 0 : 1;
+      gameState.lastResultType = won ? "win" : "lose";
+      gameState.lastResult = won
+        ? `Correct! It was ${actual}`
+        : `Missed! It was ${actual}`;
+      void logServer("settlement", {
+        targetBallId: previousTargetBallId,
+        selectedPicks: [...selectedPicks],
+        actual,
+        result: won ? "win" : "lose",
+        message: gameState.lastResult,
+      });
+      void persistBetSettlement(activeUrl, {
+        targetBallId: previousTargetBallId,
+        selectedPicks: [...selectedPicks],
+        actual,
+        result: won ? "win" : "lose",
+        message: gameState.lastResult,
+      });
+    } else {
+      gameState.lastResultType = "neutral";
+      gameState.lastResult = "Make your move for the next delivery.";
+    }
+
+    gameState.selectedPicks = [];
+    gameState.selectionBallId = latestFeedItem.id;
+  } else if (!gameState.selectionBallId) {
+    gameState.selectionBallId = latestFeedItem.id;
+  }
+
   gameState.targetBallId = latestFeedItem.id;
   gameState.targetBallLabel = getNextBallLabel(latestFeedItem.over);
+
+  if (latestFeedItem.id !== previousTargetBallId) {
+    void logServer("active_ball", {
+      targetBallId: latestFeedItem.id,
+      targetBallLabel: gameState.targetBallLabel,
+      over: latestFeedItem.over,
+      playType: latestFeedItem.playType,
+    });
+  }
 }
 
 async function ensureActiveMarketJob() {
@@ -370,6 +756,21 @@ async function handleRequest(request, response) {
   const activeSnapshot = getLiveJobSnapshot(activeUrl) || (await getScrape(activeUrl, DEFAULT_CACHE_TTL_MS));
   reconcileGameState(activeUrl, activeSnapshot.data);
 
+  if (request.method === "POST" && requestUrl.pathname === "/activity-log") {
+    try {
+      const body = await parseJsonBody(request);
+      const details = body.details && typeof body.details === "object" ? { ...body.details } : {};
+      await logUser(String(body.event || "unknown"), {
+        ...details,
+        serverPath: requestUrl.pathname,
+      });
+      sendJson(response, 200, { ok: true });
+    } catch (error) {
+      sendJson(response, 400, { error: error.message });
+    }
+    return;
+  }
+
   if (request.method === "POST" && requestUrl.pathname === "/pick") {
     try {
       const body = await parseJsonBody(request);
@@ -385,17 +786,39 @@ async function handleRequest(request, response) {
         return;
       }
 
-      if (gameState.pendingPick) {
+      if (!gameState.selectionBallId) {
+        gameState.selectionBallId = gameState.targetBallId;
+      }
+
+      if (gameState.selectionBallId !== gameState.targetBallId) {
+        gameState.selectedPicks = [];
+        gameState.selectionBallId = gameState.targetBallId;
+      }
+
+      if (gameState.selectedPicks.includes(pick)) {
         sendJson(response, 409, {
-          error: "A pick is already locked for the current target ball.",
+          error: "That outcome is already selected.",
           game: summarizeLiveScore(activeSnapshot.data).game,
         });
         return;
       }
 
-      gameState.pendingPick = pick;
-      gameState.lastResult = `Locked: ${pick}. Waiting for update...`;
+      gameState.selectedPicks = [...gameState.selectedPicks, pick];
+      gameState.lastResult = `Selected: ${gameState.selectedPicks.join(", ")}`;
       gameState.lastResultType = "neutral";
+      await logUser("pick", {
+        pick,
+        targetBallId: gameState.selectionBallId,
+        targetBallLabel: gameState.targetBallLabel,
+        selectedPicks: [...gameState.selectedPicks],
+      });
+      void persistUserBet(activeUrl, {
+        targetBallId: gameState.selectionBallId,
+        targetBallLabel: gameState.targetBallLabel,
+        pick,
+        selectedPicks: [...gameState.selectedPicks],
+      });
+      broadcastSnapshot(activeUrl, activeSnapshot.data, "pick");
       sendJson(response, 200, { ok: true, game: summarizeLiveScore(activeSnapshot.data).game });
     } catch (error) {
       sendJson(response, 400, { error: error.message });
@@ -427,6 +850,37 @@ async function handleRequest(request, response) {
     return;
   }
 
+  if (requestUrl.pathname === "/events") {
+    response.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "access-control-allow-origin": "*",
+    });
+    response.write("retry: 5000\n\n");
+
+    const client = {
+      response,
+      pingTimer: setInterval(() => {
+        try {
+          response.write(": ping\n\n");
+        } catch {
+          clearInterval(client.pingTimer);
+          sseClients.delete(client);
+        }
+      }, 25000),
+    };
+
+    sseClients.add(client);
+    sendSse(response, "snapshot", summarizeLiveScore(activeSnapshot.data));
+
+    request.on("close", () => {
+      clearInterval(client.pingTimer);
+      sseClients.delete(client);
+    });
+    return;
+  }
+
   if (requestUrl.pathname === "/health") {
     sendJson(response, 200, {
       ok: true,
@@ -434,6 +888,17 @@ async function handleRequest(request, response) {
       activeMarketUrl: activeUrl,
       liveJobs: liveJobs.size,
       cacheEntries: cache.size,
+      postgresEnabled: Boolean(DATABASE_URL),
+      postgresReady,
+    });
+    return;
+  }
+
+  if (requestUrl.pathname === "/logs") {
+    const limit = normalizePositiveInt(requestUrl.searchParams.get("limit"), 100);
+    sendJson(response, 200, {
+      ok: true,
+      entries: await readRecentLogs(limit),
     });
     return;
   }
@@ -509,6 +974,11 @@ async function handleRequest(request, response) {
 
 async function initializeApp() {
   await ensureActiveMarketJob();
+  await ensurePostgresSchema();
+  await logServer("server_active", {
+    activeMarketUrl: await getActiveMarketUrl(),
+    postgresEnabled: Boolean(DATABASE_URL),
+  });
 }
 
 export { handleRequest, initializeApp };

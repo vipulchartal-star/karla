@@ -1,6 +1,5 @@
 # ESPN Cricket Commentary Scraper
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fvipulchartal-star%2Fkarla.git)
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/vipulchartal-star/karla.git)
 
 Scrapes an ESPN cricket commentary URL and returns normalized JSON with:
@@ -11,6 +10,7 @@ Scrapes an ESPN cricket commentary URL and returns normalized JSON with:
 
 It also includes a live HTTP API for polling an active match.
 The server automatically refreshes the default match every 10 seconds on startup.
+If `DATABASE_URL` is set, the server writes scraper runs, live snapshots, and activity logs to Postgres.
 
 ## Usage
 
@@ -54,6 +54,30 @@ Once it is running, `/` returns the latest live score for the active market and 
 
 The server controls one market at a time through [active-market.txt](/data/data/com.termux/files/home/money/active-market.txt). Put one ESPN commentary URL in that file to switch the active market.
 
+### Postgres
+
+Set one of these env vars before starting the server:
+
+```bash
+DATABASE_URL="postgresql://user:pass@host:5432/dbname"
+```
+
+The app will create these tables automatically on startup:
+
+- `app_events`
+- `scrape_runs`
+- `live_snapshots`
+- `user_bets`
+- `bet_settlements`
+
+Stored data includes:
+
+- raw ESPN scrape payloads
+- live snapshots sent to the UI
+- user activity logs
+- individual user bet selections
+- settlement results for each ball
+
 ## Deployment
 
 ### Git
@@ -66,19 +90,9 @@ git add .
 git commit -m "Initial commit"
 ```
 
-### Vercel
-
-This repo includes [vercel.json](/data/data/com.termux/files/home/money/vercel.json) and a serverless entrypoint at [api/index.js](/data/data/com.termux/files/home/money/api/index.js).
-
-Deploy:
-
-```bash
-vercel
-```
-
 ### Render
 
-This repo includes [render.yaml](/data/data/com.termux/files/home/money/render.yaml).
+This repo includes [render.yaml](/data/data/com.termux/files/home/money/render.yaml) and is set up to run the full app on one Render web service.
 
 Deploy by connecting the repo in Render and using the blueprint, or create a web service with:
 
@@ -106,13 +120,18 @@ Examples:
 
 ```bash
 curl "http://127.0.0.1:3000/scrape"
+
 ```
 
+```bash
 curl "http://127.0.0.1:3000/live/start"
 ```
 
+```bash
 curl "http://127.0.0.1:3000/live"
 ```
+
+If you want the shortest path: connect the repo in Render, let the blueprint create the web service and Postgres, and use the Render URL as the only app URL.
 
 ## Output shape
 

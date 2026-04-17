@@ -4,6 +4,9 @@
   "private": true,
   "description": "CLI and HTTP API for ESPN cricket commentary pages",
   "type": "module",
+  "dependencies": {
+    "pg": "^8.13.0"
+  },
   "scripts": {
     "scrape": "node espn-cricket-commentary-scraper.mjs",
     "start": "node server.mjs",
