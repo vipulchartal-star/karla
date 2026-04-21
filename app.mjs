@@ -3,6 +3,7 @@ import { appendFile, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { scrapeEspnCommentary } from "./espn-cricket-commentary.mjs";
+import { fetchBtcPriceSnapshot, renderBtcPage } from "./btc-page.mjs";
 
 const DEFAULT_CACHE_TTL_MS = 15_000;
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
@@ -508,7 +509,16 @@ function summarizeLiveScore(data) {
 }
 
 function renderHomePage() {
-  return readFile(HOME_PAGE_PATH, "utf8");
+  return readFile(HOME_PAGE_PATH, "utf8").then((html) => {
+    const config = {
+      solanaPayUrl: process.env.SOLANA_PAY_URL || "",
+      solanaPayRecipient:
+        process.env.SOLANA_PAY_RECIPIENT ||
+        "9idsurpeyaXMygRmmnKuwauuB1zEjarj2r6Bjdji4SoK",
+    };
+    const injected = `<script>window.__APP_CONFIG__ = ${JSON.stringify(config)};</script>`;
+    return html.replace("</head>", `${injected}\n</head>`);
+  });
 }
 
 async function getScrape(url, ttlMs) {
@@ -837,6 +847,26 @@ async function handleRequest(request, response) {
       sendHtml(response, 200, html);
     } catch (error) {
       sendJson(response, 500, { error: error.message });
+    }
+    return;
+  }
+
+  if (requestUrl.pathname === "/btc") {
+    try {
+      const html = await renderBtcPage();
+      sendHtml(response, 200, html);
+    } catch (error) {
+      sendJson(response, 500, { error: error.message });
+    }
+    return;
+  }
+
+  if (requestUrl.pathname === "/btc-price.json") {
+    try {
+      const snapshot = await fetchBtcPriceSnapshot();
+      sendJson(response, 200, snapshot);
+    } catch (error) {
+      sendJson(response, 502, { error: error.message });
     }
     return;
   }

@@ -1,0 +1,50 @@
+name: Godot Web Export
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_dir:
+        description: Godot project directory
+        required: true
+        default: godot-project
+      preset_name:
+        description: Export preset name
+        required: true
+        default: Web
+      export_dir:
+        description: Directory for exported files
+        required: true
+        default: dist/godot-web
+
+jobs:
+  export-web:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Godot
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.3.0
+          use-dotnet: false
+          include-templates: true
+
+      - name: Verify project path
+        run: |
+          if [ ! -f "${{ inputs.project_dir }}/project.godot" ]; then
+            echo "Missing ${{ inputs.project_dir }}/project.godot"
+            exit 1
+          fi
+
+      - name: Export Web build
+        working-directory: ${{ inputs.project_dir }}
+        run: |
+          mkdir -p "${{ github.workspace }}/${{ inputs.export_dir }}"
+          godot --headless --export-release "${{ inputs.preset_name }}" "${{ github.workspace }}/${{ inputs.export_dir }}/index.html"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: godot-web-export
+          path: ${{ inputs.export_dir }}

@@ -271,6 +271,67 @@
       font-size: 11px;
       color: var(--muted);
     }
+    .support-bar {
+      margin: 18px 0 4px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      font-size: 12px;
+    }
+    .support-bar .label {
+      color: var(--muted);
+      text-transform: uppercase;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+    }
+    .support-bar a {
+      color: var(--accent);
+      text-decoration: none;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .support-bar a:active,
+    .support-bar a:hover {
+      text-decoration: underline;
+    }
+    .cta-row {
+      margin-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .cta-tag {
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+    .cta-tag strong {
+      color: var(--text);
+    }
+    .cta-button {
+      width: 100%;
+      padding: 14px 16px;
+      border-radius: 16px;
+      border: 1px solid var(--accent);
+      background: rgba(190, 242, 100, 0.08);
+      color: var(--accent);
+      text-decoration: none;
+      text-align: center;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+    }
+    .cta-button:active,
+    .cta-button:hover {
+      background: rgba(190, 242, 100, 0.14);
+    }
   </style>
 </head>
 <body>
@@ -308,8 +369,22 @@
   <div style="font-size: 10px; font-weight: 800; color: var(--muted); text-transform: uppercase; margin-bottom: 10px;">Recent commentary</div>
   <div class="strip" id="ball-strip"></div>
   <div class="feed-container" id="feed-container"></div>
+  <div class="support-bar" aria-label="Support contact">
+    <div>
+      <div class="label">Support</div>
+      <div>Need help? Message <span style="color: var(--text); font-weight: 800;">@Gellyop</span></div>
+    </div>
+    <a href="https://t.me/Gellyop" target="_blank" rel="noreferrer">Telegram</a>
+  </div>
+  <div class="cta-row">
+    <div class="cta-tag">Want to support the game?</div>
+    <a class="cta-button" id="solana-pay-button" href="#" target="_blank" rel="noreferrer" hidden>Solana Pay</a>
+  </div>
 </div>
 
+<script>
+  window.__APP_CONFIG__ = window.__APP_CONFIG__ || {};
+</script>
 <script>
   const dataMap = [
     {v:"0", l:"Dot", o:"1.8x"}, {v:"1", l:"Single", o:"2.5x"}, {v:"2", l:"Double", o:"8.0x"},
@@ -370,6 +445,7 @@
   }
 
   let currentSelectedPicks = [];
+  const appConfig = window.__APP_CONFIG__ || {};
 
   function render() {
     document.getElementById("main-grid").innerHTML = dataMap.map((d) => `
@@ -405,6 +481,24 @@
         settlement.textContent = error.message;
       });
     });
+  }
+
+  function setupSolanaPayButton() {
+    const button = document.getElementById("solana-pay-button");
+    const url = String(appConfig.solanaPayUrl || "").trim();
+    const recipient = String(appConfig.solanaPayRecipient || "").trim();
+    if (!button || !url) {
+      if (!button || !recipient) {
+        return;
+      }
+
+      button.hidden = false;
+      button.href = `solana:${recipient}`;
+      return;
+    }
+
+    button.hidden = false;
+    button.href = url;
   }
 
   function applySnapshot(d) {
@@ -474,6 +568,7 @@
   }
 
   render();
+  setupSolanaPayButton();
   logActivity("page_load", {
     path: window.location.pathname,
   });
